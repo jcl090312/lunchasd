@@ -4,96 +4,214 @@ import pandas as pd
 import plotly.express as px
 import re
 import calendar
-from datetime import date
-
+from datetime import datetime
 
 # =========================================================
 # 기본 설정
 # =========================================================
 
 st.set_page_config(
-    page_title="오늘 뭐 먹지?",
+    page_title="학교 급식 데이터 분석",
     page_icon="🥗",
     layout="wide"
 )
 
+st.title("🥗 학교 급식 데이터 분석")
+st.caption("NEIS 학교급식 데이터를 활용한 월간 급식 · 영양 · 채식 친화도 분석")
 
 # =========================================================
-# 디자인
-# =========================================================
-
-st.markdown("""
-<style>
-
-.main-title {
-    font-size: 42px;
-    font-weight: 800;
-    margin-bottom: 5px;
-}
-
-.sub-title {
-    color: #777;
-    font-size: 17px;
-    margin-bottom: 25px;
-}
-
-.meal-card {
-    padding: 20px;
-    border-radius: 16px;
-    background: #f8f9fa;
-    border: 1px solid #eeeeee;
-    margin-bottom: 15px;
-}
-
-.vegan-good {
-    padding: 12px;
-    border-radius: 10px;
-    background: #eaf7ed;
-}
-
-.vegan-warning {
-    padding: 12px;
-    border-radius: 10px;
-    background: #fff5e6;
-}
-
-.month-cell {
-    min-height: 130px;
-    padding: 10px;
-    border: 1px solid #eeeeee;
-    border-radius: 10px;
-    background: #fafafa;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-
-# =========================================================
-# API KEY
-# =========================================================
-
-if "NEIS_API_KEY" not in st.secrets:
-    st.error(
-        "NEIS API 키가 없습니다.\n\n"
-        "Streamlit → Settings → Secrets에 "
-        "NEIS_API_KEY를 등록해주세요."
-    )
-    st.stop()
-
-API_KEY = st.secrets["NEIS_API_KEY"]
-
-
-# =========================================================
-# 상수
+# API 설정
 # =========================================================
 
 SCHOOL_API = "https://open.neis.go.kr/hub/schoolInfo"
 MEAL_API = "https://open.neis.go.kr/hub/mealServiceDietInfo"
 
+try:
+    API_KEY = st.secrets["NEIS_API_KEY"]
+except:
+    st.error(
+        "NEIS_API_KEY가 설정되지 않았습니다.\n\n"
+        ".streamlit/secrets.toml에 API 키를 넣어주세요."
+    )
+    st.stop()
+
 
 # =========================================================
-# 알레르기 번호
+# 학교 검색
+# =========================================================
+
+@st.cache_data(ttl=3600)
+def search_school(school_name):
+
+    params = {
+        "KEY": API_KEY,
+        "Type": "json",
+        "pIndex": 1,
+        "pSize": 50,
+        "SCHUL_NM": school_name
+    }
+
+    try:
+        response = requests.get(
+            SCHOOL_API,
+            params=params,
+            timeout=10
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        if "schoolInfo" not in data:
+            return pd.DataFrame()
+
+        rows = data["schoolInfo"][1]["row"]
+
+        df = pd.DataFrame(rows)
+
+        return df
+
+    except Exception:
+        return pd.DataFrame()
+
+
+# =========================================================
+# 월간 급식 가져오기
+# =========================================================
+
+@st.cache_data(ttl=600)
+def get_month_meals(atpt_code, school_code, year, month):
+
+    start_date = f"{year}{month:02d}01"
+
+    last_day = calendar.monthrange(year, month)[1]
+    end_date = f"{year}{month:02d}{last_day:02d}"
+
+    params = {
+        "KEY": API_KEY,
+        "Type": "json",
+        "pIndex": 1,
+        "pSize": 1000,
+        "ATPT_OFCDC_SC_CODE": atpt_code,
+        "SD_SCHUL_CODE": school_code,
+        "MLSV_FROM_YMD": start_date,
+        "MLSV_TO_YMD": end_date
+    }
+
+    try:
+        response = requests.get(
+            MEAL_API,
+            params=params,
+            timeout=15
+        )
+
+        response.raise_for_status()
+        data = response.json()
+
+        if "mealServiceDietInfo" not in data:
+            return pd.DataFrame()
+
+        rows = data["mealServiceDietInfo"][1]["row"]
+
+        return pd.DataFrame(rows)
+
+    except Exception:
+        return pd.DataFrame()
+
+
+# =========================================================
+# 메뉴 정리
+# =========================================================
+
+def clean_menu(menu):
+
+    if pd.isna(menu):
+        return ""
+
+    menu = str(menu)
+
+    # HTML 태그 제거
+    menu = re.sub(r"<br\s*/?>", "\n", menu, flags=re.I)
+    menu = re.sub(r"<[^>]+>", "", menu)
+
+    return menu.strip()
+
+
+def split_menu(menu):
+
+    menu = clean_menu(menu)
+
+    if not menu:
+        return []
+
+    lines = menu.split("\n")
+
+    result = []
+
+    for line in lines:
+
+        line = line.strip()
+
+        if line:
+            result.append(line)
+
+    return result
+
+
+# =========================================================
+# 영양정보 파싱
+# =========================================================
+
+def parse_nutrition(text):
+
+    if pd.isna(text):
+        return {
+            "탄수화물": None,
+            "단백질": None,
+            "지방": None
+        }
+
+    text = str(text)
+
+    result = {
+        "탄수화물": None,
+        "단백질": None,
+        "지방": None
+    }
+
+    patterns = {
+        "탄수화물": r"탄수화물\s*\(g\)\s*[:：]?\s*([0-9.]+)",
+        "단백질": r"단백질\s*\(g\)\s*[:：]?\s*([0-9.]+)",
+        "지방": r"지방\s*\(g\)\s*[:：]?\s*([0-9.]+)"
+    }
+
+    for key, pattern in patterns.items():
+
+        match = re.search(pattern, text)
+
+        if match:
+            result[key] = float(match.group(1))
+
+    return result
+
+
+def parse_calorie(text):
+
+    if pd.isna(text):
+        return None
+
+    match = re.search(
+        r"([0-9]+(?:\.[0-9]+)?)",
+        str(text)
+    )
+
+    if match:
+        return float(match.group(1))
+
+    return None
+
+
+# =========================================================
+# 알레르기 정보
 # =========================================================
 
 ALLERGY = {
@@ -119,347 +237,236 @@ ALLERGY = {
 }
 
 
-# =========================================================
-# 학교 검색
-# =========================================================
+def get_allergies(menu):
 
-@st.cache_data(ttl=3600)
-def search_school(keyword):
+    if pd.isna(menu):
+        return []
 
-    if not keyword:
-        return pd.DataFrame()
+    text = str(menu)
 
-    params = {
-        "KEY": API_KEY,
-        "Type": "json",
-        "pIndex": 1,
-        "pSize": 50,
-        "SCHUL_NM": keyword
-    }
-
-    try:
-
-        response = requests.get(
-            SCHOOL_API,
-            params=params,
-            timeout=10
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        if "schoolInfo" not in data:
-            return pd.DataFrame()
-
-        rows = data["schoolInfo"][1]["row"]
-
-        result = []
-
-        for row in rows:
-
-            result.append({
-                "학교명": row.get("SCHUL_NM", ""),
-                "교육청코드": row.get(
-                    "ATPT_OFCDC_SC_CODE", ""
-                ),
-                "학교코드": row.get(
-                    "SD_SCHUL_CODE", ""
-                ),
-                "학교종류": row.get(
-                    "SCHUL_KND_SC_NM", ""
-                ),
-                "주소": row.get(
-                    "ORG_RDNMA", ""
-                )
-            })
-
-        return pd.DataFrame(result)
-
-    except Exception:
-
-        return pd.DataFrame()
-
-
-# =========================================================
-# 급식 조회
-# =========================================================
-
-@st.cache_data(ttl=600)
-def get_meals(
-    office_code,
-    school_code,
-    from_date,
-    to_date
-):
-
-    params = {
-        "KEY": API_KEY,
-        "Type": "json",
-        "pIndex": 1,
-        "pSize": 1000,
-        "ATPT_OFCDC_SC_CODE": office_code,
-        "SD_SCHUL_CODE": school_code,
-        "MLSV_FROM_YMD": from_date.strftime("%Y%m%d"),
-        "MLSV_TO_YMD": to_date.strftime("%Y%m%d")
-    }
-
-    try:
-
-        response = requests.get(
-            MEAL_API,
-            params=params,
-            timeout=15
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        if "mealServiceDietInfo" not in data:
-            return pd.DataFrame()
-
-        rows = data["mealServiceDietInfo"][1]["row"]
-
-        result = []
-
-        for row in rows:
-
-            nutrition = parse_nutrition(
-                row.get("NTR_INFO", "")
-            )
-
-            result.append({
-
-                "날짜": row.get(
-                    "MLSV_YMD", ""
-                ),
-
-                "식사": row.get(
-                    "MMEAL_SC_NM", ""
-                ),
-
-                "메뉴": clean_menu(
-                    row.get("DDISH_NM", "")
-                ),
-
-                "원산지": row.get(
-                    "ORPLC_INFO", ""
-                ),
-
-                "칼로리": parse_number(
-                    row.get("CAL_INFO", "")
-                ),
-
-                "탄수화물": nutrition["탄수화물"],
-
-                "단백질": nutrition["단백질"],
-
-                "지방": nutrition["지방"],
-
-                "알레르기번호": extract_allergy_numbers(
-                    row.get("DDISH_NM", "")
-                )
-            })
-
-        return pd.DataFrame(result)
-
-    except Exception:
-
-        return pd.DataFrame()
-
-
-# =========================================================
-# 메뉴 정리
-# =========================================================
-
-def clean_menu(menu):
-
-    menu = menu.replace("<br/>", "\n")
-    menu = menu.replace("<br>", "\n")
-
-    return menu
-
-
-# =========================================================
-# 숫자 추출
-# =========================================================
-
-def parse_number(text):
-
-    if not text:
-        return None
-
-    match = re.search(
-        r"[-+]?\d*\.?\d+",
-        str(text)
-    )
-
-    if match:
-        return float(match.group())
-
-    return None
-
-
-# =========================================================
-# 영양정보 파싱
-# =========================================================
-
-def parse_nutrition(text):
-
-    result = {
-        "탄수화물": None,
-        "단백질": None,
-        "지방": None
-    }
-
-    if not text:
-        return result
-
-    patterns = {
-
-        "탄수화물": [
-            r"탄수화물[^0-9]*([\d.]+)",
-            r"탄수[^0-9]*([\d.]+)"
-        ],
-
-        "단백질": [
-            r"단백질[^0-9]*([\d.]+)"
-        ],
-
-        "지방": [
-            r"지방[^0-9]*([\d.]+)"
-        ]
-    }
-
-    for key, pattern_list in patterns.items():
-
-        for pattern in pattern_list:
-
-            match = re.search(
-                pattern,
-                text
-            )
-
-            if match:
-
-                result[key] = float(
-                    match.group(1)
-                )
-
-                break
-
-    return result
-
-
-# =========================================================
-# 알레르기 번호
-# =========================================================
-
-def extract_allergy_numbers(menu):
-
+    # 메뉴 뒤쪽의 괄호 안 숫자를 찾음
     numbers = re.findall(
-        r"(?<!\d)(1[0-9]|[1-9])(?!\d)",
-        menu
+        r"\(([0-9.\s]+)\)",
+        text
     )
+
+    found = set()
+
+    for group in numbers:
+
+        for number in re.findall(r"\d+", group):
+
+            if number in ALLERGY:
+                found.add(number)
 
     return sorted(
-        set(numbers),
+        found,
         key=lambda x: int(x)
     )
 
 
 # =========================================================
-# 채식 친화도 추정
+# 채식 친화도 분석
 # =========================================================
 
 ANIMAL_KEYWORDS = [
+
+    # 육류
     "돼지",
+    "돼지고기",
     "돈육",
     "제육",
-    "삼겹",
-    "닭",
-    "치킨",
-    "계란",
-    "달걀",
-    "난",
+    "삼겹살",
     "소고기",
     "쇠고기",
-    "한우",
     "불고기",
     "갈비",
+    "닭",
+    "닭고기",
+    "치킨",
+    "오리",
+
+    # 가공육
+    "햄",
+    "소시지",
+    "베이컨",
+    "스팸",
+
+    # 생선
     "고등어",
     "연어",
     "참치",
-    "오징어",
-    "새우",
-    "게",
-    "조개",
     "멸치",
-    "육수",
-    "어묵",
-    "햄",
-    "소시지"
+    "꽁치",
+    "갈치",
+    "생선",
+
+    # 해산물
+    "새우",
+    "오징어",
+    "문어",
+    "낙지",
+    "게",
+    "꽃게",
+    "조개",
+    "굴",
+    "홍합",
+
+    # 달걀 / 유제품
+    "계란",
+    "달걀",
+    "메추리알",
+    "우유",
+    "치즈",
+    "버터",
+    "크림"
 ]
 
 
-def vegan_score(menu):
+def is_animal_menu(menu):
 
     text = menu.lower()
 
-    detected = []
-
     for keyword in ANIMAL_KEYWORDS:
 
-        if keyword in text:
-            detected.append(keyword)
+        if keyword.lower() in text:
+            return True
 
-    detected = list(dict.fromkeys(detected))
+    return False
 
-    if len(detected) == 0:
-        return 100, []
 
-    score = max(
-        0,
-        100 - len(detected) * 20
+def daily_vegan_score(menu):
+
+    menus = split_menu(menu)
+
+    if not menus:
+        return None
+
+    vegan_possible = 0
+
+    for item in menus:
+
+        if not is_animal_menu(item):
+            vegan_possible += 1
+
+    score = vegan_possible / len(menus) * 100
+
+    return round(score, 1)
+
+
+def monthly_vegan_score(df):
+
+    if df.empty:
+        return None
+
+    scores = []
+
+    for _, row in df.iterrows():
+
+        score = daily_vegan_score(
+            row["급식메뉴"]
+        )
+
+        if score is not None:
+            scores.append(score)
+
+    if not scores:
+        return None
+
+    return round(sum(scores) / len(scores), 1)
+
+
+def score_grade(score):
+
+    if score is None:
+        return "데이터 없음"
+
+    if score >= 80:
+        return "매우 높음"
+
+    if score >= 60:
+        return "높음"
+
+    if score >= 40:
+        return "보통"
+
+    if score >= 20:
+        return "낮음"
+
+    return "매우 낮음"
+
+
+# =========================================================
+# 급식 데이터 전처리
+# =========================================================
+
+def prepare_meals(df):
+
+    if df.empty:
+        return df
+
+    result = df.copy()
+
+    result["급식일"] = pd.to_datetime(
+        result["MLSV_YMD"],
+        format="%Y%m%d"
     )
 
-    return score, detected
+    result["급식메뉴"] = result["DDISH_NM"].apply(
+        clean_menu
+    )
 
+    result["식사"] = result["MMEAL_SC_NM"]
 
-# =========================================================
-# 알레르기 표시
-# =========================================================
+    result["칼로리"] = result["CAL_INFO"].apply(
+        parse_calorie
+    )
 
-def allergy_names(numbers):
+    nutrition = result["NTR_INFO"].apply(
+        parse_nutrition
+    )
 
-    result = []
+    result["탄수화물"] = nutrition.apply(
+        lambda x: x["탄수화물"]
+    )
 
-    for number in numbers:
+    result["단백질"] = nutrition.apply(
+        lambda x: x["단백질"]
+    )
 
-        if number in ALLERGY:
+    result["지방"] = nutrition.apply(
+        lambda x: x["지방"]
+    )
 
-            result.append(
-                f"{number}. {ALLERGY[number]}"
-            )
+    result["채식점수"] = result["급식메뉴"].apply(
+        daily_vegan_score
+    )
+
+    result["알레르기"] = result["급식메뉴"].apply(
+        get_allergies
+    )
 
     return result
 
 
 # =========================================================
-# 제목
+# 날짜 선택
 # =========================================================
 
-st.markdown(
-    '<div class="main-title">🥗 오늘 뭐 먹지?</div>',
-    unsafe_allow_html=True
+now = datetime.now()
+
+st.sidebar.header("📅 분석 기간")
+
+year = st.sidebar.selectbox(
+    "연도",
+    range(now.year - 2, now.year + 1),
+    index=2
 )
 
-st.markdown(
-    '<div class="sub-title">'
-    '학교 급식을 분석하고 나에게 맞는 급식을 찾아보세요.'
-    '</div>',
-    unsafe_allow_html=True
+month = st.sidebar.selectbox(
+    "월",
+    range(1, 13),
+    index=now.month - 1
 )
 
 
@@ -467,242 +474,322 @@ st.markdown(
 # 학교 선택
 # =========================================================
 
-st.subheader("🏫 학교 선택")
+st.sidebar.header("🏫 학교 선택")
 
-st.caption(
-    "당곡고등학교가 기본으로 선택됩니다. "
-    "여러 학교를 선택하면 영양 정보를 비교할 수 있습니다."
+st.sidebar.caption(
+    "최대 5개 학교를 비교할 수 있습니다."
 )
 
-
-school_slots = []
-
-default_names = [
-    "당곡고등학교",
-    "",
-    "",
-    "",
-    ""
-]
-
+school_names = []
 
 for i in range(5):
 
-    with st.expander(
+    default = "당곡고등학교" if i == 0 else ""
+
+    name = st.sidebar.text_input(
         f"학교 {i + 1}",
-        expanded=(i < 3)
-    ):
+        value=default,
+        key=f"school_{i}"
+    )
 
-        keyword = st.text_input(
-            f"학교 {i + 1} 검색",
-            value=default_names[i],
-            key=f"school_search_{i}",
-            placeholder="예: 당곡고등학교"
-        )
-
-        if keyword:
-
-            results = search_school(keyword)
-
-            if not results.empty:
-
-                options = []
-
-                for _, row in results.iterrows():
-
-                    options.append(
-                        f'{row["학교명"]} | '
-                        f'{row["학교종류"]} | '
-                        f'{row["주소"]}'
-                    )
-
-                selected = st.selectbox(
-                    f"학교 {i + 1} 선택",
-                    options,
-                    key=f"school_select_{i}"
-                )
-
-                selected_index = options.index(
-                    selected
-                )
-
-                school_slots.append(
-                    results.iloc[selected_index]
-                )
-
-            else:
-
-                st.warning(
-                    "검색된 학교가 없습니다."
-                )
+    if name.strip():
+        school_names.append(name.strip())
 
 
-# 중복 제거
-unique_schools = []
+if len(school_names) == 0:
 
-school_codes = set()
-
-for school in school_slots:
-
-    code = school["학교코드"]
-
-    if code not in school_codes:
-
-        unique_schools.append(school)
-        school_codes.add(code)
+    st.info("학교를 한 곳 이상 입력해주세요.")
+    st.stop()
 
 
 # =========================================================
-# 날짜
-# =========================================================
-
-st.divider()
-
-selected_date = st.date_input(
-    "📅 조회할 날짜",
-    value=date.today()
-)
-
-
-# =========================================================
-# 데이터 조회
+# 학교 데이터 가져오기
 # =========================================================
 
 school_data = {}
 
-for school in unique_schools:
+with st.spinner("학교와 급식 데이터를 불러오는 중입니다..."):
 
-    meals = get_meals(
-        school["교육청코드"],
-        school["학교코드"],
-        selected_date,
-        selected_date
-    )
+    for name in school_names:
 
-    school_data[
-        school["학교명"]
-    ] = meals
+        school_df = search_school(name)
 
-
-# =========================================================
-# 오늘 급식
-# =========================================================
-
-st.divider()
-
-st.header("🍚 오늘의 급식")
-
-
-if not unique_schools:
-
-    st.info(
-        "학교를 선택해주세요."
-    )
-
-else:
-
-    for school_name, meals in school_data.items():
-
-        st.subheader(
-            f"🏫 {school_name}"
-        )
-
-        if meals.empty:
-
-            st.warning(
-                "해당 날짜의 급식 정보가 없습니다."
-            )
-
+        if school_df.empty:
             continue
 
-        for _, meal in meals.iterrows():
+        # 입력한 이름과 가장 비슷한 학교를 우선 선택
+        exact = school_df[
+            school_df["SCHUL_NM"] == name
+        ]
 
-            score, detected = vegan_score(
-                meal["메뉴"]
-            )
+        if not exact.empty:
+            selected = exact.iloc[0]
+        else:
+            selected = school_df.iloc[0]
 
-            if score >= 80:
+        atpt_code = selected["ATPT_OFCDC_SC_CODE"]
+        school_code = selected["SD_SCHUL_CODE"]
+        real_name = selected["SCHUL_NM"]
 
-                status = "🥬 채식 친화적 메뉴로 추정"
+        meals = get_month_meals(
+            atpt_code,
+            school_code,
+            year,
+            month
+        )
 
-                css_class = "vegan-good"
+        meals = prepare_meals(meals)
 
-            else:
+        school_data[real_name] = meals
 
-                status = "⚠️ 동물성 식재료 포함 가능성"
 
-                css_class = "vegan-warning"
+if not school_data:
 
-            st.markdown(
-                f"""
-                <div class="meal-card">
-
-                <h3>
-                🍴 {meal["식사"]}
-                </h3>
-
-                <p style="white-space:pre-line;">
-                {meal["메뉴"]}
-                </p>
-
-                <div class="{css_class}">
-                <b>{status}</b><br>
-                채식 친화도 추정: {score}점
-                </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            if detected:
-
-                st.caption(
-                    "감지된 동물성 식재료 관련 키워드: "
-                    + ", ".join(detected)
-                )
+    st.error(
+        "학교 정보를 찾지 못했습니다. "
+        "학교명을 다시 확인해주세요."
+    )
+    st.stop()
 
 
 # =========================================================
-# 월간 데이터 가져오기
+# 학교별 월간 채식 점수
 # =========================================================
 
-st.divider()
+st.header("🥗 이달의 채식 친화도")
 
-st.header("📅 월간 급식표")
+score_data = []
 
-year = selected_date.year
-month = selected_date.month
+for school, df in school_data.items():
 
-first_day = date(
-    year,
-    month,
-    1
-)
+    score = monthly_vegan_score(df)
 
-last_day = date(
-    year,
-    month,
-    calendar.monthrange(
-        year,
-        month
-    )[1]
-)
+    score_data.append({
+        "학교": school,
+        "채식 친화도": score if score is not None else 0,
+        "평가": score_grade(score)
+    })
+
+score_df = pd.DataFrame(score_data)
 
 
-monthly_data = {}
+# =========================================================
+# 점수 카드
+# =========================================================
 
-with st.spinner("이번 달 급식을 불러오는 중입니다..."):
+cols = st.columns(len(score_df))
 
-    for school in unique_schools:
+for col, (_, row) in zip(cols, score_df.iterrows()):
 
-        monthly_data[
-            school["학교명"]
-        ] = get_meals(
-            school["교육청코드"],
-            school["학교코드"],
-            first_day,
-            last_day
+    with col:
+
+        st.metric(
+            label=row["학교"],
+            value=f"{row['채식 친화도']:.1f}점"
+        )
+
+        st.caption(
+            f"평가: {row['평가']}"
+        )
+
+
+# =========================================================
+# 점수 계산 방법
+# =========================================================
+
+with st.expander("📖 채식 친화도 점수는 어떻게 계산하나요?"):
+
+    st.markdown("""
+### 채식 친화도 계산 방법
+
+이 점수는 **급식 메뉴 이름을 분석해서 계산한 추정값**입니다.
+
+#### ① 하루 점수
+
+하루의 급식 메뉴 중에서 동물성 식재료가 포함된 것으로
+확인되는 메뉴를 제외하고 계산합니다.
+
+**하루 점수 = 채식 가능 메뉴 수 ÷ 전체 메뉴 수 × 100**
+
+예를 들어,
+
+- 전체 메뉴: 5개
+- 동물성 식재료가 확인되는 메뉴: 2개
+- 채식 가능 메뉴: 3개
+
+라면
+
+**3 ÷ 5 × 100 = 60점**
+
+입니다.
+
+#### ② 한 달 점수
+
+해당 월의 급식일별 점수를 모두 계산한 뒤 평균을 냅니다.
+
+**월간 채식 친화도 = 하루 점수들의 평균**
+
+### 점수 해석
+
+| 점수 | 의미 |
+|---:|---|
+| 80~100점 | 매우 높음 |
+| 60~79점 | 높음 |
+| 40~59점 | 보통 |
+| 20~39점 | 낮음 |
+| 0~19점 | 매우 낮음 |
+
+⚠️ **중요:** 메뉴 이름만으로는 육수, 소스, 조리 과정 등에 들어간
+동물성 재료나 교차 접촉 여부를 확인할 수 없습니다.
+따라서 이 점수는 **비건 인증이나 안전성을 보장하는 점수가 아니라
+월간 급식 메뉴를 비교하기 위한 참고용 지표**입니다.
+""")
+
+
+# =========================================================
+# 학교별 점수 비교 그래프
+# =========================================================
+
+if len(score_df) >= 2:
+
+    fig = px.bar(
+        score_df,
+        x="학교",
+        y="채식 친화도",
+        text="채식 친화도",
+        title=f"{year}년 {month}월 학교별 채식 친화도"
+    )
+
+    fig.update_traces(
+        texttemplate="%{text:.1f}점",
+        textposition="outside"
+    )
+
+    fig.update_layout(
+        yaxis_title="채식 친화도 점수",
+        xaxis_title="학교",
+        yaxis_range=[0, 100]
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+
+# =========================================================
+# 영양 비교
+# =========================================================
+
+st.header("📊 월간 영양 데이터 비교")
+
+nutrition_rows = []
+
+for school, df in school_data.items():
+
+    if df.empty:
+        continue
+
+    # 점심 데이터만 우선 사용
+    lunch = df[df["식사"].astype(str).str.contains("중식")]
+
+    if lunch.empty:
+        lunch = df
+
+    nutrition_rows.append({
+        "학교": school,
+        "탄수화물": lunch["탄수화물"].mean(),
+        "단백질": lunch["단백질"].mean(),
+        "지방": lunch["지방"].mean(),
+        "한 달 평균 열량": lunch["칼로리"].mean()
+    })
+
+nutrition_df = pd.DataFrame(nutrition_rows)
+
+if not nutrition_df.empty:
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+
+        fig = px.bar(
+            nutrition_df,
+            x="학교",
+            y="탄수화물",
+            text="탄수화물",
+            title="📊 학교별 평균 탄수화물"
+        )
+
+        fig.update_traces(
+            texttemplate="%{text:.1f}g",
+            textposition="outside"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    with c2:
+
+        fig = px.bar(
+            nutrition_df,
+            x="학교",
+            y="단백질",
+            text="단백질",
+            title="📊 학교별 평균 단백질"
+        )
+
+        fig.update_traces(
+            texttemplate="%{text:.1f}g",
+            textposition="outside"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    c3, c4 = st.columns(2)
+
+    with c3:
+
+        fig = px.bar(
+            nutrition_df,
+            x="학교",
+            y="지방",
+            text="지방",
+            title="📊 학교별 평균 지방"
+        )
+
+        fig.update_traces(
+            texttemplate="%{text:.1f}g",
+            textposition="outside"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    with c4:
+
+        fig = px.bar(
+            nutrition_df,
+            x="학교",
+            y="한 달 평균 열량",
+            text="한 달 평균 열량",
+            title="📊 한 달 평균 열량"
+        )
+
+        fig.update_traces(
+            texttemplate="%{text:.1f} kcal",
+            textposition="outside"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
         )
 
 
@@ -710,267 +797,195 @@ with st.spinner("이번 달 급식을 불러오는 중입니다..."):
 # 월간 급식표
 # =========================================================
 
-for school_name, meals in monthly_data.items():
+st.header(f"📅 {year}년 {month}월 월간 급식표")
 
-    st.subheader(
-        f"🏫 {school_name}"
-    )
+st.caption(
+    "달력에서 날짜별 급식 메뉴와 채식 친화도 추정 점수를 한눈에 확인할 수 있습니다."
+)
 
-    if meals.empty:
 
-        st.info(
-            "이번 달 급식 정보가 없습니다."
-        )
+# 학교별 탭
+tabs = st.tabs(
+    list(school_data.keys())
+)
 
-        continue
+for tab, (school, df) in zip(
+    tabs,
+    school_data.items()
+):
 
-    monthly = meals.copy()
+    with tab:
 
-    monthly["날짜"] = pd.to_datetime(
-        monthly["날짜"]
-    )
+        if df.empty:
 
-    monthly["일"] = monthly[
-        "날짜"
-    ].dt.day
-
-    # 날짜별 메뉴 묶기
-    table = []
-
-    for day in sorted(
-        monthly["일"].unique()
-    ):
-
-        day_data = monthly[
-            monthly["일"] == day
-        ]
-
-        lunch = day_data[
-            day_data["식사"].str.contains(
-                "중식",
-                na=False
+            st.warning(
+                "이 학교의 해당 월 급식 데이터가 없습니다."
             )
+
+            continue
+
+        # 중식 우선
+        lunch = df[
+            df["식사"].astype(str).str.contains("중식")
+        ].copy()
+
+        if lunch.empty:
+            lunch = df.copy()
+
+        # 날짜별 데이터
+        day_data = {}
+
+        for _, row in lunch.iterrows():
+
+            day = row["급식일"].day
+
+            day_data[day] = {
+                "menu": row["급식메뉴"],
+                "score": row["채식점수"],
+                "allergy": row["알레르기"]
+            }
+
+        # 요일 헤더
+        weekday_cols = st.columns(7)
+
+        weekdays = [
+            "월",
+            "화",
+            "수",
+            "목",
+            "금",
+            "토",
+            "일"
         ]
 
-        if not lunch.empty:
+        for col, weekday in zip(
+            weekday_cols,
+            weekdays
+        ):
 
-            menu = lunch.iloc[0]["메뉴"]
+            col.markdown(
+                f"**{weekday}**"
+            )
 
-        else:
-
-            menu = "급식 정보 없음"
-
-        table.append({
-
-            "일": f"{int(day)}일",
-
-            "요일": pd.to_datetime(
-                f"{year}-{month:02d}-{int(day):02d}"
-            ).strftime("%a"),
-
-            "급식": menu
-        })
-
-    calendar_df = pd.DataFrame(table)
-
-    st.dataframe(
-        calendar_df,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# =========================================================
-# 월간 통계
-# =========================================================
-
-st.divider()
-
-st.header("📊 월간 영양 분석")
-
-
-monthly_rows = []
-
-
-for school_name, meals in monthly_data.items():
-
-    if meals.empty:
-        continue
-
-    temp = meals.copy()
-
-    temp["학교"] = school_name
-
-    monthly_rows.append(temp)
-
-
-if monthly_rows:
-
-    all_monthly = pd.concat(
-        monthly_rows,
-        ignore_index=True
-    )
-
-    # 숫자 변환
-    numeric_columns = [
-        "칼로리",
-        "탄수화물",
-        "단백질",
-        "지방"
-    ]
-
-    for column in numeric_columns:
-
-        all_monthly[column] = pd.to_numeric(
-            all_monthly[column],
-            errors="coerce"
+        # 달력
+        month_calendar = calendar.monthcalendar(
+            year,
+            month
         )
 
+        for week in month_calendar:
 
-    # =====================================================
-    # 평균 수치
-    # =====================================================
+            cols = st.columns(7)
 
-    stats = (
-        all_monthly
-        .groupby("학교")[numeric_columns]
-        .mean()
-        .reset_index()
+            for col, day in zip(cols, week):
+
+                with col:
+
+                    if day == 0:
+                        st.write("")
+                        continue
+
+                    st.markdown(
+                        f"### {day}일"
+                    )
+
+                    if day not in day_data:
+
+                        st.caption(
+                            "급식 없음"
+                        )
+
+                        continue
+
+                    info = day_data[day]
+
+                    score = info["score"]
+
+                    if score is not None:
+
+                        st.metric(
+                            "채식 친화도",
+                            f"{score:.0f}점"
+                        )
+
+                    menu_items = split_menu(
+                        info["menu"]
+                    )
+
+                    for item in menu_items:
+
+                        # 알레르기 번호는 별도 표시
+                        clean_item = re.sub(
+                            r"\([0-9.\s]+\)",
+                            "",
+                            item
+                        ).strip()
+
+                        if clean_item:
+
+                            st.write(
+                                f"• {clean_item}"
+                            )
+
+                    if info["allergy"]:
+
+                        allergy_names = [
+                            ALLERGY[x]
+                            for x in info["allergy"]
+                        ]
+
+                        st.caption(
+                            "⚠️ 알레르기: "
+                            + ", ".join(allergy_names)
+                        )
+
+                    st.divider()
+
+
+# =========================================================
+# 일별 채식 점수 추이
+# =========================================================
+
+st.header("📈 한 달 동안의 채식 친화도 변화")
+
+for school, df in school_data.items():
+
+    if df.empty:
+        continue
+
+    lunch = df[
+        df["식사"].astype(str).str.contains("중식")
+    ].copy()
+
+    if lunch.empty:
+        lunch = df.copy()
+
+    if lunch.empty:
+        continue
+
+    chart_df = lunch[
+        ["급식일", "채식점수"]
+    ].dropna()
+
+    if chart_df.empty:
+        continue
+
+    fig = px.line(
+        chart_df,
+        x="급식일",
+        y="채식점수",
+        markers=True,
+        title=f"{school} - 월간 채식 친화도 변화"
     )
 
-
-    # =====================================================
-    # 학교별 평균 열량
-    # =====================================================
-
-    st.subheader("🔥 한 달 평균 열량")
-
-    fig_calorie = px.bar(
-        stats,
-        x="학교",
-        y="칼로리",
-        text="칼로리",
-        title="학교별 한 달 평균 급식 열량",
-        labels={
-            "학교": "학교",
-            "칼로리": "평균 열량 (kcal)"
-        }
-    )
-
-    fig_calorie.update_traces(
-        texttemplate="%{text:.0f} kcal",
-        textposition="outside"
-    )
-
-    fig_calorie.update_layout(
-        template="plotly_white",
-        height=450
-    )
-
-    st.plotly_chart(
-        fig_calorie,
-        use_container_width=True
-    )
-
-
-    # =====================================================
-    # 탄수화물
-    # =====================================================
-
-    st.subheader("📊 탄수화물 비교")
-
-    fig_carbs = px.bar(
-        stats,
-        x="학교",
-        y="탄수화물",
-        text="탄수화물",
-        title="학교별 평균 탄수화물",
-        labels={
-            "학교": "학교",
-            "탄수화물": "탄수화물 (g)"
-        }
-    )
-
-    fig_carbs.update_traces(
-        texttemplate="%{text:.1f} g",
-        textposition="outside"
-    )
-
-    fig_carbs.update_layout(
-        template="plotly_white",
-        height=450
-    )
-
-    st.plotly_chart(
-        fig_carbs,
-        use_container_width=True
-    )
-
-
-    # =====================================================
-    # 단백질
-    # =====================================================
-
-    st.subheader("📊 단백질 비교")
-
-    fig_protein = px.bar(
-        stats,
-        x="학교",
-        y="단백질",
-        text="단백질",
-        title="학교별 평균 단백질",
-        labels={
-            "학교": "학교",
-            "단백질": "단백질 (g)"
-        }
-    )
-
-    fig_protein.update_traces(
-        texttemplate="%{text:.1f} g",
-        textposition="outside"
-    )
-
-    fig_protein.update_layout(
-        template="plotly_white",
-        height=450
-    )
-
-    st.plotly_chart(
-        fig_protein,
-        use_container_width=True
-    )
-
-
-    # =====================================================
-    # 지방
-    # =====================================================
-
-    st.subheader("📊 지방 비교")
-
-    fig_fat = px.bar(
-        stats,
-        x="학교",
-        y="지방",
-        text="지방",
-        title="학교별 평균 지방",
-        labels={
-            "학교": "학교",
-            "지방": "지방 (g)"
-        }
-    )
-
-    fig_fat.update_traces(
-        texttemplate="%{text:.1f} g",
-        textposition="outside"
-    )
-
-    fig_fat.update_layout(
-        template="plotly_white",
-        height=450
+    fig.update_layout(
+        yaxis_title="채식 친화도",
+        xaxis_title="날짜",
+        yaxis_range=[0, 100]
     )
 
     st.plotly_chart(
-        fig_fat,
+        fig,
         use_container_width=True
     )
 
@@ -979,76 +994,84 @@ if monthly_rows:
 # 알레르기 정보
 # =========================================================
 
-st.divider()
+st.header("⚠️ 월간 알레르기 정보")
 
-st.header("⚠️ 알레르기 정보")
+for school, df in school_data.items():
 
-st.caption(
-    "NEIS 급식 데이터에 표시된 알레르기 번호를 "
-    "식재료 이름으로 변환하여 보여줍니다."
-)
-
-for school_name, meals in school_data.items():
-
-    if meals.empty:
+    if df.empty:
         continue
 
-    st.subheader(
-        f"🏫 {school_name}"
-    )
+    st.subheader(f"🏫 {school}")
 
-    for _, meal in meals.iterrows():
+    allergy_count = {}
 
-        allergy = allergy_names(
-            meal["알레르기번호"]
+    for allergies in df["알레르기"]:
+
+        for number in allergies:
+
+            allergy_name = ALLERGY[number]
+
+            allergy_count[allergy_name] = (
+                allergy_count.get(allergy_name, 0) + 1
+            )
+
+    if allergy_count:
+
+        allergy_df = pd.DataFrame(
+            list(allergy_count.items()),
+            columns=["알레르기 항목", "등장 횟수"]
+        ).sort_values(
+            "등장 횟수",
+            ascending=False
         )
 
-        if allergy:
+        st.dataframe(
+            allergy_df,
+            use_container_width=True,
+            hide_index=True
+        )
 
-            st.write(
-                f"**{meal['식사']}**"
-            )
+    else:
 
-            st.write(
-                " · ".join(allergy)
-            )
+        st.info(
+            "해당 월 급식 데이터에서 알레르기 번호가 확인되지 않았습니다."
+        )
+
+
+# =========================================================
+# 원본 월간 데이터
+# =========================================================
+
+st.header("📋 월간 급식 데이터")
+
+for school, df in school_data.items():
+
+    with st.expander(f"🔎 {school} 전체 데이터 보기"):
+
+        if df.empty:
+
+            st.write("데이터가 없습니다.")
 
         else:
 
-            st.write(
-                f"**{meal['식사']}**: "
-                "표시된 알레르기 정보 없음"
+            display_df = df[
+                [
+                    "급식일",
+                    "식사",
+                    "급식메뉴",
+                    "칼로리",
+                    "탄수화물",
+                    "단백질",
+                    "지방",
+                    "채식점수"
+                ]
+            ].copy()
+
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True
             )
-
-
-# =========================================================
-# 원산지 정보
-# =========================================================
-
-st.divider()
-
-st.header("🌾 원산지 정보")
-
-for school_name, meals in school_data.items():
-
-    if meals.empty:
-        continue
-
-    st.subheader(
-        f"🏫 {school_name}"
-    )
-
-    for _, meal in meals.iterrows():
-
-        if meal["원산지"]:
-
-            with st.expander(
-                f"{meal['식사']} 원산지"
-            ):
-
-                st.text(
-                    meal["원산지"]
-                )
 
 
 # =========================================================
@@ -1058,12 +1081,14 @@ for school_name, meals in school_data.items():
 st.divider()
 
 st.caption(
-    "※ 본 서비스는 NEIS 공개 급식 데이터를 활용합니다. "
-    "급식 메뉴명만으로 실제 조리 과정이나 소스에 포함된 "
-    "모든 원재료를 확인할 수 없으므로, "
-    "채식 친화도는 참고용 추정치입니다."
+    "※ 본 서비스는 NEIS 학교급식 데이터를 활용하여 메뉴·영양정보를 분석합니다."
 )
 
 st.caption(
-    "데이터 출처: 교육부·시도교육청 나이스 교육정보 개방 포털"
+    "※ 채식 친화도는 메뉴명에 나타난 식재료를 기준으로 계산한 참고용 추정치이며, "
+    "실제 조리 과정이나 육수·소스의 성분을 보장하지 않습니다."
+)
+
+st.caption(
+    "※ 알레르기 정보는 NEIS에서 제공하는 급식 알레르기 표시를 기준으로 합니다."
 )
