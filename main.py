@@ -1,39 +1,41 @@
 import streamlit as st
-import pandas as pd
 import requests
+import pandas as pd
 import plotly.express as px
 from datetime import date, timedelta
 
 
-# ==========================================
-# 페이지 설정
-# ==========================================
+# ==================================================
+# 기본 설정
+# ==================================================
 
 st.set_page_config(
-    page_title="우리 학교 급식",
+    page_title="오늘 뭐 먹지?",
     page_icon="🍚",
     layout="wide"
 )
 
 
-# ==========================================
+# ==================================================
 # CSS
-# ==========================================
+# ==================================================
 
 st.markdown("""
 <style>
 
 .main-title {
-    font-size: 40px;
-    font-weight: 700;
+    font-size: 42px;
+    font-weight: 800;
+    margin-bottom: 5px;
 }
 
-.subtitle {
-    color: #666;
+.sub-title {
+    color: #777;
     font-size: 17px;
+    margin-bottom: 25px;
 }
 
-.meal-card {
+.school-card {
     padding: 20px;
     border-radius: 15px;
     background-color: #f7f7f7;
@@ -44,214 +46,326 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ==========================================
-# 학교 데이터
-# ==========================================
+# ==================================================
+# API KEY
+# ==================================================
 
-@st.cache_data
-def load_schools():
-
-    # GitHub Raw 주소로 변경
-    url = "YOUR_GITHUB_RAW_CSV_URL"
-
-    return pd.read_csv(url)
-
-
-schools = load_schools()
+try:
+    API_KEY = st.secrets["NEIS_API_KEY"]
+except Exception:
+    st.error(
+        "NEIS API 키가 설정되지 않았습니다. "
+        "Streamlit Secrets에 NEIS_API_KEY를 등록해주세요."
+    )
+    st.stop()
 
 
-# ==========================================
-# NEIS 급식 API
-# ==========================================
+# ==================================================
+# 학교 검색 API
+# ==================================================
 
-def get_meal(office_code, school_code, target_date):
+@st.cache_data(ttl=3600)
+def search_schools(keyword):
 
-    api_key = st.secrets["NEIS_API_KEY"]
+    url = "https://open.neis.go.kr/hub/schoolInfo"
+
+    params = {
+        "KEY": API_KEY,
+        "Type": "json",
+        "pIndex": 1,
+        "pSize": 100,
+        "SCHUL_NM": keyword
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if "schoolInfo" not in data:
+            return pd.DataFrame()
+
+        rows = data["schoolInfo"][1]["row"]
+
+        result = []
+
+        for row in rows:
+
+            result.append({
+                "학교명": row.get("SCHUL_NM", ""),
+                "교육청코드": row.get("ATPT_OFCDC_SC_CODE", ""),
+                "학교코드": row.get("SD_SCHUL_CODE", ""),
+                "학교종류": row.get("SCHUL_KND_SC_NM", ""),
+                "주소": row.get("ORG_RDNMA", "")
+            })
+
+        return pd.DataFrame(result)
+
+    except Exception as e:
+
+        st.error(f"학교 검색 중 오류가 발생했습니다: {e}")
+
+        return pd.DataFrame()
+
+
+# ==================================================
+# 급식 API
+# ==================================================
+
+@st.cache_data(ttl=600)
+def get_meal(
+    office_code,
+    school_code,
+    target_date
+):
 
     url = "https://open.neis.go.kr/hub/mealServiceDietInfo"
 
     params = {
-        "KEY": api_key,
+        "KEY": API_KEY,
         "Type": "json",
+        "pIndex": 1,
+        "pSize": 100,
         "ATPT_OFCDC_SC_CODE": office_code,
         "SD_SCHUL_CODE": school_code,
         "MLSV_YMD": target_date.strftime("%Y%m%d")
     }
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=10
-    )
-
-    if response.status_code != 200:
-        return None
-
-    data = response.json()
-
     try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if "mealServiceDietInfo" not in data:
+            return pd.DataFrame()
+
         rows = data["mealServiceDietInfo"][1]["row"]
 
-        return rows
+        result = []
 
-    except (KeyError, IndexError):
-        return None
+        for row in rows:
+
+            result.append({
+
+                "식사": row.get(
+                    "MMEAL_SC_NM",
+                    ""
+                ),
+
+                "메뉴": row.get(
+                    "DDISH_NM",
+                    ""
+                ),
+
+                "칼로리": row.get(
+                    "CAL_INFO",
+                    ""
+                ),
+
+                "탄수화물": row.get(
+                    "CAR_INFO",
+                    ""
+                ),
+
+                "단백질": row.get(
+                    "PRO_INFO",
+                    ""
+                ),
+
+                "지방": row.get(
+                    "FAT_INFO",
+                    ""
+                ),
+
+                "원산지": row.get(
+                    "ORPLC_INFO",
+                    ""
+                )
+            })
+
+        return pd.DataFrame(result)
+
+    except Exception:
+
+        return pd.DataFrame()
 
 
-# ==========================================
+# ==================================================
 # 제목
-# ==========================================
+# ==================================================
 
 st.markdown(
-    '<div class="main-title">🍚 우리 학교 급식</div>',
+    '<div class="main-title">🍚 오늘 뭐 먹지?</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
-    '<div class="subtitle">전국 학교의 급식을 한눈에 확인하고 비교해보세요.</div>',
+    '<div class="sub-title">'
+    '전국 학교 급식을 검색하고 비교해보세요.'
+    '</div>',
     unsafe_allow_html=True
 )
 
-st.divider()
 
-
-# ==========================================
-# 학교 선택
-# ==========================================
+# ==================================================
+# 학교 검색
+# ==================================================
 
 st.subheader("🏫 학교 선택")
 
-school_names = schools["학교명"].dropna().unique().tolist()
-
-default_school = "당곡고등학교"
-
-default_index = (
-    school_names.index(default_school)
-    if default_school in school_names
-    else 0
-)
-
-selected_schools = st.multiselect(
-    "비교할 학교를 선택하세요.",
-    school_names,
-    default=[default_school] if default_school in school_names else [],
-    help="2개 이상의 학교를 선택하면 학교별 비교가 가능합니다."
+keyword = st.text_input(
+    "학교 이름을 검색하세요",
+    value="당곡고등학교",
+    placeholder="예: 당곡고등학교"
 )
 
 
-# ==========================================
-# 날짜 선택
-# ==========================================
+# ==================================================
+# 검색 실행
+# ==================================================
 
-selected_date = st.date_input(
-    "📅 급식 날짜",
-    value=date.today()
-)
+if keyword:
+
+    schools = search_schools(keyword)
+
+else:
+
+    schools = pd.DataFrame()
 
 
-# ==========================================
-# 선택 학교 확인
-# ==========================================
+if schools.empty:
 
-if not selected_schools:
-
-    st.info("학교를 하나 이상 선택해주세요.")
+    st.warning(
+        "검색된 학교가 없습니다."
+    )
 
     st.stop()
 
 
-# ==========================================
-# 학교 급식 데이터 수집
-# ==========================================
+# ==================================================
+# 학교 선택
+# ==================================================
 
-meal_results = []
+school_labels = []
 
-for school_name in selected_schools:
+for _, school in schools.iterrows():
 
-    school_info = schools[
-        schools["학교명"] == school_name
-    ]
-
-    if school_info.empty:
-        continue
-
-    school = school_info.iloc[0]
-
-    meals = get_meal(
-        school["교육청코드"],
-        school["학교코드"],
-        selected_date
+    label = (
+        f'{school["학교명"]} '
+        f'({school["학교종류"]}) - '
+        f'{school["주소"]}'
     )
 
-    if meals:
-
-        for meal in meals:
-
-            meal_results.append({
-                "학교명": school_name,
-                "식사": meal.get("MMEAL_SC_NM", ""),
-                "메뉴": meal.get("DDISH_NM", ""),
-                "칼로리": meal.get("CAL_INFO", ""),
-                "탄수화물": meal.get("CAR_INFO", ""),
-                "단백질": meal.get("PRO_INFO", ""),
-                "지방": meal.get("FAT_INFO", ""),
-                "알레르기": meal.get("ORPLC_INFO", "")
-            })
+    school_labels.append(label)
 
 
-meal_df = pd.DataFrame(meal_results)
-
-
-# ==========================================
-# 급식 표시
-# ==========================================
-
-st.divider()
-
-st.subheader(
-    f"🍱 {selected_date.strftime('%Y년 %m월 %d일')} 급식"
+selected_labels = st.multiselect(
+    "비교할 학교를 선택하세요.",
+    school_labels,
+    default=school_labels[:1]
 )
 
 
-if meal_df.empty:
+# ==================================================
+# 선택된 학교 정보
+# ==================================================
 
-    st.warning("해당 날짜의 급식 정보가 없습니다.")
+selected_schools = []
 
-else:
+for label in selected_labels:
+
+    index = school_labels.index(label)
+
+    selected_schools.append(
+        schools.iloc[index]
+    )
+
+
+# ==================================================
+# 날짜 선택
+# ==================================================
+
+st.subheader("📅 급식 날짜")
+
+selected_date = st.date_input(
+    "날짜를 선택하세요.",
+    value=date.today()
+)
+
+
+# ==================================================
+# 급식 조회
+# ==================================================
+
+if selected_schools:
+
+    st.divider()
+
+    st.subheader(
+        f"🍱 {selected_date.strftime('%Y년 %m월 %d일')} 급식"
+    )
+
+    all_meals = []
 
     for school in selected_schools:
 
-        school_meal = meal_df[
-            meal_df["학교명"] == school
-        ]
+        meals = get_meal(
+            school["교육청코드"],
+            school["학교코드"],
+            selected_date
+        )
 
-        if school_meal.empty:
+        if meals.empty:
 
-            st.warning(
-                f"{school}: 급식 정보가 없습니다."
+            st.info(
+                f'{school["학교명"]}: '
+                "해당 날짜의 급식 정보가 없습니다."
             )
 
             continue
 
+
+        # ------------------------------------------
+        # 학교 제목
+        # ------------------------------------------
+
         st.markdown(
-            f"### 🏫 {school}"
+            f"### 🏫 {school['학교명']}"
         )
 
-        for _, meal in school_meal.iterrows():
+        # ------------------------------------------
+        # 급식 표시
+        # ------------------------------------------
+
+        for _, meal in meals.iterrows():
 
             st.markdown(
                 f"""
-                <div class="meal-card">
+                <div class="school-card">
 
-                <b>{meal["식사"]}</b>
+                <h4>🍴 {meal['식사']}</h4>
 
-                <br><br>
+                <p>
+                {meal['메뉴']}
+                </p>
 
-                {meal["메뉴"]}
-
-                <br><br>
-
-                🔥 {meal["칼로리"]}
+                <p>
+                🔥 {meal['칼로리']}
+                </p>
 
                 </div>
                 """,
@@ -259,101 +373,115 @@ else:
             )
 
 
-# ==========================================
-# 학교 비교
-# ==========================================
+        # ------------------------------------------
+        # 그래프용 데이터
+        # ------------------------------------------
 
-if len(selected_schools) >= 2 and not meal_df.empty:
+        for _, meal in meals.iterrows():
 
-    st.divider()
+            calorie_text = str(
+                meal["칼로리"]
+            )
 
-    st.subheader("📊 학교별 영양 비교")
+            try:
 
-    # 숫자 변환
-    meal_df["열량"] = (
-        meal_df["칼로리"]
-        .str.extract(r"([\d.]+)")
-        .astype(float)
-    )
+                calorie = float(
+                    calorie_text
+                    .replace("kcal", "")
+                    .strip()
+                )
 
-    comparison = (
-        meal_df
-        .groupby("학교명")["열량"]
-        .mean()
-        .reset_index()
-    )
+            except:
 
-    fig = px.bar(
-        comparison,
-        x="학교명",
-        y="열량",
-        title="학교별 평균 급식 열량",
-        labels={
-            "학교명": "학교",
-            "열량": "열량 (kcal)"
-        },
-        text_auto=".0f"
-    )
-
-    fig.update_layout(
-        template="plotly_white",
-        height=450
-    )
-
-    st.plotly_chart(
-        fig,
-        use_container_width=True
-    )
+                calorie = None
 
 
-# ==========================================
-# 급식 상세 정보
-# ==========================================
+            if calorie is not None:
 
-if not meal_df.empty:
+                all_meals.append({
+
+                    "학교": school["학교명"],
+
+                    "식사": meal["식사"],
+
+                    "열량": calorie
+
+                })
+
+
+# ==================================================
+# 학교 비교 그래프
+# ==================================================
+
+if len(selected_schools) >= 2:
 
     st.divider()
 
-    tab1, tab2, tab3 = st.tabs([
-        "🥗 영양 정보",
-        "⚠️ 알레르기",
-        "📋 원산지"
-    ])
+    st.subheader(
+        "📊 학교별 급식 열량 비교"
+    )
 
-    with tab1:
+    chart_df = pd.DataFrame(
+        all_meals
+    )
 
-        st.dataframe(
-            meal_df[
-                [
-                    "학교명",
-                    "식사",
-                    "칼로리",
-                    "탄수화물",
-                    "단백질",
-                    "지방"
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True
+    if not chart_df.empty:
+
+        comparison = (
+            chart_df
+            .groupby("학교")["열량"]
+            .mean()
+            .reset_index()
         )
 
-    with tab2:
+        fig = px.bar(
 
-        st.dataframe(
-            meal_df[
-                [
-                    "학교명",
-                    "식사",
-                    "알레르기"
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True
+            comparison,
+
+            x="학교",
+
+            y="열량",
+
+            text="열량",
+
+            title="학교별 평균 급식 열량",
+
+            labels={
+                "학교": "학교",
+                "열량": "열량 (kcal)"
+            }
+
         )
 
-    with tab3:
+        fig.update_traces(
+            texttemplate="%{text:.0f} kcal",
+            textposition="outside"
+        )
+
+        fig.update_layout(
+            height=500,
+            template="plotly_white"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    else:
 
         st.info(
-            "NEIS API에서 제공하는 원산지 정보를 "
-            "이 영역에 표시할 수 있습니다."
+            "비교할 영양 정보가 없습니다."
         )
+
+
+# ==================================================
+# 안내
+# ==================================================
+
+else:
+
+    st.info(
+        "학교를 2개 이상 선택하면 "
+        "학교 비교 그래프가 나타납니다."
+    )
